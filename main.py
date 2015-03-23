@@ -3,448 +3,205 @@
 Echo data calculation software
 """
 # Major library imports
-from numpy import histogram
-import time
+import numpy as np
+import pandas as pd
+
+from pyqtgraph.Qt import QtGui, QtCore
+import pyqtgraph as pg
 
 
-# Enthought library imports
-from enable.api import ComponentEditor
-from traits.api import HasTraits, Float, Range, Button, Enum, File
-from traitsui.api import Item, View, HGroup, spring, RangeEditor
-from enthought.traits.ui.key_bindings import KeyBinding, KeyBindings
-
-# Chaco imports
-from chaco.api import ArrayPlotData, OverlayPlotContainer, Plot, PlotAxis, PlotGrid
-from chaco.tools.api import RangeSelection, RangeSelectionOverlay, PanTool, ZoomTool
+LASER_TITLE = 'Laser'
+DELAY_TITLE = 'Time'
 
 
-def follow(thefile):
-    """
-    Follows the file like tail -f
-    """
-    thefile.seek(0, 2)
-    while True:
-        line = thefile.readline()
-        if not line:
-            time.sleep(0.1)
-            continue
-        yield line
-
-
-def find(target_list, val):
-    """
-    Finds all the positions of val in list
-    """
-    return [i for i, element in enumerate(target_list) if element == val]
-
-
-class Window(HasTraits):
-
-    calc_button = Button("Calculate")
-    copy_button = Button("Copy Data")
-    refresh_button = Button("Refresh")
-    graph_list = Enum('delay', 'temp', 'npe1', 'npe2', 'npe3', 'laser', 'extra')
-
-    stats = []
-
-    step = Range(1., 5000.)
-    low = Float(1.)
-    high = Float(5000.)
-
-    xmin = Float
-    xmax = Float
-    laser_min = Float
-    laser_max = Float
-
-    hit_rate = Float
-    av_num = Float
-
-    file_name = File
-
-    laserdata = ArrayPlotData()
-    echodata = ArrayPlotData()
-
-    bins = Range(30, 400)
-
-    data = {'delay': [], 'temp': [], 'npe1': [], 'npe2': [],
-            'npe3': [], 'laser': [], 'extra': []}
-
-    size = (800, 300)
-    bar_container = OverlayPlotContainer(bgcolor="white", use_backbuffer=True)
-    line_container = OverlayPlotContainer(bgcolor="white", use_backbuffer=True)
-
-    # Key bindings
-    move_right_bind = KeyBinding(binding1='.', binding2='>', method_name='move_right')
-    move_left_bind = KeyBinding(binding1=',', binding2='<', method_name='move_left')
-    calc_bind = KeyBinding(binding1='m', binding2='ь', method_name='calc_bind_fired')
-    bindings = KeyBindings(move_left_bind, move_right_bind, calc_bind)
-
-    # TraitsUI definition
-    traits_view = View(HGroup(Item('refresh_button', show_label=False),
-                              Item('file_name', style='simple',
-                                                label='File'),
-                              spring,
-                              Item('step', label='Scan step',
-                                    editor=RangeEditor(mode='auto',
-                                                       low_name='low',
-                                                       high_name='high')
-                                   )
-                              ),
-                       Item('bar_container',
-                            editor=ComponentEditor(size=size),
-                            show_label=False, resizable=True),
-                       Item('line_container',
-                            editor=ComponentEditor(size=size),
-                            show_label=False, resizable=True),
-                       HGroup(Item("bins"),
-                              Item('graph_list'), spring,
-                              Item("laser_min", style='readonly'), spring,
-                              Item("laser_max", style='readonly'), spring,
-                              Item("hit_rate", style='readonly'), spring,
-                              Item('av_num', style='readonly'), spring,
-                              show_border=True, label="Info"),
-                       HGroup(spring, Item('calc_button', show_label=False),
-                                      Item('copy_button', show_label=False)),
-                        key_bindings=bindings)
-
+class MainWindow(QtGui.QMainWindow):
     def __init__(self):
-        super(Window, self).__init__()
-        self.bins = 100
-        self._create_plot()
+        super(MainWindow, self).__init__()
 
-    def _file_name_changed(self, filename):
+        # pg.setConfigOption('background', 'w')
+        # pg.setConfigOption('foreground', 'k')
+        pg.setConfigOptions(antialias=True)
+
+        self.setWindowTitle("Echo Data Processing")
+        self.resize(1100, 600)
+
+        # Массив с данными
+        self.data = pd.DataFrame()
+
+        self._central_widget = QtGui.QWidget()
+        self._main_layout = QtGui.QVBoxLayout()
+
+        # GraphLayoutWidget с двумя графиками: гистограмма лазера и эхо
+        self._plot_area = pg.GraphicsLayoutWidget()
+        self.laser_plot = self._plot_area.addPlot()
+        self._plot_area.nextRow()
+        self.echo_plot = self._plot_area.addPlot()
+
+        # ComboBox для выбора графика
+        self._graph_select = QtGui.QComboBox()
+        self._graph_select.currentIndexChanged.connect(self._calc_curve_data)
+
+        # Область выделения
+        self._select_region = pg.LinearRegionItem()
+        self._select_region.setZValue(-10)
+        self._select_region.sigRegionChanged.connect(self._calc_curve_data)
+
+        # Бины для гистограммы лазера
+        self._bins_widget = QtGui.QSpinBox()
+        self._bins_widget.setMinimum(1)
+        self._bins_widget.setMaximum(1000)
+        self._bins_widget.setValue(200)
+        self._bins_widget.valueChanged.connect(self._on_bins_value_changed)
+
+        # Вертикальная линия для фита
+        self._v_line = pg.InfiniteLine(angle=90, movable=True)
+        self._v_line.sigPositionChangeFinished.connect(self._on_v_line_pos_changed)
+
+        # Кпопка копирования в буфер
+        self._copy_data_btn = QtGui.QPushButton("Скопировать в буфер")
+        self._copy_data_btn.clicked.connect(self._on_copy_data_clicked)
+
+        # Layout для выбора графиков и бинов
+        self._aux_layout = QtGui.QHBoxLayout()
+        self._aux_layout.addWidget(self._bins_widget)
+        self._aux_layout.addWidget(self._graph_select)
+        self._aux_layout.addStretch(5)
+        self._aux_layout.addWidget(self._copy_data_btn)
+
+        self._main_layout.addWidget(self._plot_area)
+        self._main_layout.addLayout(self._aux_layout)
+
+        self._central_widget.setLayout(self._main_layout)
+        self.setCentralWidget(self._central_widget)
+
+        self._create_actions()
+        self._create_menu()
+        self._create_status_bar()
+
+    def _on_v_line_pos_changed(self):
+        self._calc_curve_data()
+
+    def _on_copy_data_clicked(self):
+        if not self.averaged_data.empty:
+            self.averaged_data.to_clipboard()
+
+    def _update_line_pos(self):
+        try:
+            self._v_line.setPos(self.averaged_data.mean())
+        except ValueError:
+            pass
+
+    def _fill_graph_select(self):
         """
-        Open file button handler
+        Функция заполняет ComboBox названиями колонок из данных
         """
-        filename = filename.replace('\\', '/')
-        self.data = {'delay': [], 'temp': [], 'npe1': [], 'npe2': [],
-                     'npe3': [], 'laser': [], 'extra': []}
-        self._read_data(filename)
-        index, value = self._calc_data(self.bins)
-        self._fill_plot(self.laser_plot, index, value)
+        if not self.data.empty:
+            for item in self.data.columns:
+                self._graph_select.addItem(item)
 
-    def _create_plot(self):
+    def _on_region_changed(self):
+        pass
+
+    def _on_bins_value_changed(self):
         """
-        Creates 2 plots with dummy data
+        Функция срабатывает при изменении бинов
         """
-        # Prepare initial data for Plot
-        index, value = [0,], [0,]
-        # print index, value
-        self.laserdata.set_data('Laser', index)
-        self.laserdata.set_data('Counts', value)
+        if not self.data.empty:
+            y, x = np.histogram(self.data[LASER_TITLE], bins=self._bins_widget.value())
+            curve = pg.PlotCurveItem(x, y, stepMode=True, fillLevel=0, brush=(255, 255, 255, 40))
+            self.laser_plot.clear()
+            self.laser_plot.addItem(curve)
+            self._select_region.setRegion([self.data[LASER_TITLE].min(), self.data[LASER_TITLE].max()])
+            self.laser_plot.addItem(self._select_region)
 
-        # Create Plot object
-        self.laser_plotter = Plot(data=self.laserdata)
+    def _create_menu(self):
+        self._file_menu = self.menuBar().addMenu("&File")
+        self._file_menu.addAction(self._open_action)
+        self._file_menu.addAction(self._exit_action)
 
-        # Select subplot to work with
-        self.laser_plot = self.laser_plotter.plot(['Laser', 'Counts'],
-                                              type='line')[0]
+        self._help_menu = self.menuBar().addMenu("&Help")
+        self._help_menu.addAction(self._about_action)
+        self._help_menu.addAction(self._about_qt_action)
 
-        ############## Add tools ###########
-        # Pan Tool
-        self.laser_plot.tools.append(PanTool(self.laser_plot, constrain=True,
-                                       constrain_direction="x"))
+    def _create_status_bar(self):
+        self.statusBar().showMessage("Ready")
 
-        # Zoom Tool
-        self.laser_plot.overlays.append(ZoomTool(self.laser_plot,
-                                                 always_on=False,
-                                                 tool_mode = "box",
-                                                 axis = "index",
-                                                 max_zoom_out_factor = 1.0))
-
-        # Range Select Tool
-        self.rangeselect = RangeSelection(component=self.laser_plot,
-                                          left_button_selects=False,
-                                          auto_handle_event=False)
-        self.laser_plot.active_tool = self.rangeselect
-        self.laser_plot.overlays.append(RangeSelectionOverlay(component=\
-                                        self.laser_plot))
-        self.rangeselect.on_trait_change(self.on_selection_changed,
-                                         "selection")
-        ############## [Add tools] ###########
-
-        # Configure axes and grids
-        self._configure_plot(self.laser_plot)
-
-        # add plot to the container
-        self.bar_container.add(self.laser_plot)
-
-
-        # Create Plot object
-        self.echodata.set_data('Delay', [0,])
-        self.echodata.set_data('Echo', [0,])
-        self.echo_plotter = Plot(data=self.echodata)
-
-        # Select subplot to work with
-        self.echo_plot = self.echo_plotter.plot(['Delay', 'Echo'],
-                                                type='scatter')[0]
-
-        ############## Add tools ###########
-        # Pan Tool
-        self.echo_plot.tools.append(PanTool(self.echo_plot, constrain=True,
-                                       constrain_direction="x"))
-
-        # Zoom Tool
-        self.echo_plot.overlays.append(ZoomTool(self.echo_plot, always_on=False,
-                                           tool_mode = "box",
-                                           axis = "index",
-                                           max_zoom_out_factor = 1.0))
-
-        ############## [Add tools] ###########
-
-        # Configure axes and grids
-        self._configure_plot(self.echo_plot)
-
-        # add plot to the container
-        self.line_container.add(self.echo_plot)
-
-
-    def _fill_plot(self, plot, xdata, ydata):
-        """
-        Fill plot with data and request for redraw
-        """
-        self.laserdata.set_data('Laser', xdata)
-        self.laserdata.set_data('Counts', ydata)
-        plot.request_redraw()
-
-
-    def _fill_echo_plot(self, plot, xdata, ydata):
-        """
-        Fill plot with data and request for redraw
-        """
-        self.echodata.set_data('Delay', xdata)
-        self.echodata.set_data('Echo', ydata)
-        plot.request_redraw()
-
-
-    def _calc_data(self, bins):
-        """
-        Return histogram data with `bins` number of bins
-        """
-        hist_data, bin_edges = histogram(self.data['laser'], bins=bins)
-        xdata = []
-
-        for i in range(bins):
-            xdata.append((bin_edges[i] + bin_edges[i+1]) / 2.)
-
-        return (xdata, list(hist_data))
-
-
-    def on_selection_changed(self, selection):
-        """
-        Handler for RectangleSelection tool change event
-        """
-        if selection != None:
-            self.laser_min, self.laser_max = selection
-            # self._calc_curve_data(self.laser_min, self.laser_max)
-
-
-    def _read_data(self, filename):
-        """
-        Read data from file and fill self.data variable
-        """
-        with open(filename, 'r') as datafile:
-            # skip a header line
-            next(datafile)
-            for lineno, line in enumerate(datafile):
-                # replace all commas with dots and delete whitespaces
-                # try to parse string
-                try:
-                    delay, temp, npe1, npe2, npe3, laser, extra, datetime = \
-                    line.replace(',', '.').rstrip().split('\t')
-                    self.data['delay'].append(float(delay))
-                    self.data['temp'].append(float(temp))
-                    self.data['npe1'].append(float(npe1))
-                    self.data['npe2'].append(float(npe2))
-                    self.data['npe3'].append(float(npe3))
-                    self.data['laser'].append(float(laser))
-                    self.data['extra'].append(float(extra))
-                except Exception as ex:
-                    print("Can't split string # %s: %s" % (lineno, ex))
-
-
-    def _bins_changed(self):
-        """
-        Handler for bins changed event
-        """
-        x, y = self._calc_data(self.bins)
-        self._fill_plot(self.laser_plot, x, y)
-
-
-    def _configure_plot(self, plot, xlabel='Laser'):
-        """
-        Set up colors, grids, etc. on plot objects.
-        """
-        plot.bgcolor='white'
-        plot.border_visible=True
-        plot.padding=[40, 15, 15, 20]
-        plot.color='darkred'
-        plot.line_width = 1.1
-
-        vertical_grid = PlotGrid(component=plot,
-                                 mapper=plot.index_mapper,
-                                 orientation='vertical',
-                                 line_color="gray",
-                                 line_style='dot',
-                                 use_draw_order=True)
-
-        horizontal_grid = PlotGrid(component=plot,
-                                   mapper=plot.value_mapper,
-                                   orientation='horizontal',
-                                   line_color="gray",
-                                   line_style='dot',
-                                   use_draw_order=True)
-
-        vertical_axis = PlotAxis(orientation='left',
-                                 mapper=plot.value_mapper,
-                                 use_draw_order=True)
-
-        horizontal_axis = PlotAxis(orientation='bottom',
-                                  title=xlabel,
-                                  mapper=plot.index_mapper,
-                                  use_draw_order=True)
-
-        # plot.underlays.append(vertical_grid)
-        # plot.underlays.append(horizontal_grid)
-
-        # Have to add axes to overlays because we are backbuffering the main
-        # plot, and only overlays get to render in addition to the backbuffer.
-        plot.overlays.append(vertical_axis)
-        plot.overlays.append(horizontal_axis)
-
-
-    def _calc_curve_data(self, laser_min, laser_max):
+    def _calc_curve_data(self):
         """
         Calculates data for echo plot
         """
+        laser_min, laser_max = self._select_region.getRegion()
         # good data indices
-        good_indices = []
-        for index, laser in enumerate(self.data['laser']):
-            if laser > laser_min and laser < laser_max:
-                good_indices.append(index)
-        self.hit_rate = float(len(good_indices)) / \
-                        float(len(self.data['laser'])) * 100.
-        good_data = {'delay': [], 'temp': [], 'npe1': [], 'npe2': [],
-            'npe3': [], 'laser': [], 'extra': []}
-        for column in good_data:
-            for index in good_indices:
-                good_data[column].append(self.data[column][index])
-        # print good_data
-        self.avereged_data = self._average_data(good_data, 'delay')
-        # print self.avereged_data
-        self._fill_echo_plot(self.echo_plot, self.avereged_data['delay'],
-                             self.avereged_data[self.graph_list])
-        # self._configure_plot(self.echo_plot)
-        self.av_num = float(sum(self.stats))/float(len(self.stats))
+        good_data = self.data[(laser_min < self.data[LASER_TITLE]) & (self.data[LASER_TITLE] < laser_max)]
+        mean = good_data[LASER_TITLE].mean()
+        std = good_data[LASER_TITLE].std()
+
+        self.statusBar().showMessage(
+            "Мин. лазер: {:.2f}\tМакс. лазер: {:.2f}\tСредний: {:.2f}\tСигма: {:.2f}\tСтарт: {:.5f}".format(laser_min,
+                                                                                                            laser_max,
+                                                                                                            mean,
+                                                                                                            std,
+                                                                                                            self._v_line.value()))
+
+        self.averaged_data = good_data.groupby(DELAY_TITLE).mean().reset_index()
+        self.echo_plot.clear()
+        self.echo_plot.plot(self.averaged_data[DELAY_TITLE], self.averaged_data[self._graph_select.currentText()])
+        self.echo_plot.addItem(self._v_line)
+        self._update_line_pos()
+
+    def _about(self):
+        QtGui.QMessageBox.about(self, "About EDP", "fgsfds")
+
+    def _open(self):
+        filename = QtGui.QFileDialog.getOpenFileName(self, filter="*.dat")
+        if filename:
+            self.data = pd.read_csv(filename, sep='\t', decimal=',')
+            self.statusBar().showMessage("File loaded", 2000)
+            self._fill_graph_select()
+            self._plot_hist()
+            # except Exception as e:
+            # self.statusBar().showMessage("Loading failed: {}".format(e))
+
+    def _plot_hist(self):
+        if not self.data.empty:
+            try:
+                y, x = np.histogram(self.data[LASER_TITLE], bins=self._bins_widget.value())
+                curve = pg.PlotCurveItem(x, y, stepMode=True, fillLevel=0, brush=(255, 255, 255, 40))
+                self.laser_plot.addItem(curve)
+                self._select_region.setRegion([self.data[LASER_TITLE].min(), self.data[LASER_TITLE].max()])
+                self.laser_plot.addItem(self._select_region)
+            except KeyError:
+                self.statusBar().showMessage("Laser field not found in data provided. Nothing to plot.")
+
+    def _create_actions(self):
+
+        self._open_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'),
+                                          "&Open...", self, shortcut=QtGui.QKeySequence.Open,
+                                          statusTip="Open an existing file", triggered=self._open)
+
+        self._exit_action = QtGui.QAction("E&xit", self,
+                                          shortcut=QtGui.QKeySequence.Quit,
+                                          statusTip="Exit the application",
+                                          triggered=QtGui.qApp.closeAllWindows)
+
+        self._about_action = QtGui.QAction("&About", self,
+                                           statusTip="Show the application's About box",
+                                           triggered=self._about)
+
+        self._about_qt_action = QtGui.QAction("About &Qt", self,
+                                              statusTip="Show the Qt library's About box",
+                                              triggered=QtGui.qApp.aboutQt)
 
 
-    def _average_data(self, data, column):
-        """
-        Average all `data` by values in `column` column
-        """
-        averaged_data = {'delay': [], 'temp': [], 'npe1': [], 'npe2': [],
-            'npe3': [], 'laser': [], 'extra': []}
-        self.stats = []
-        for element in data[column]:
-            # print "Element", element
-            indices = find(data[column], element)
-            self.stats.append(len(indices))
-            # print "Found on", indices
-            if len(indices)>1:
-                for col_name, col_values in data.iteritems():
-                    av_data = self._average_column(col_values, indices)
-                    self._clean_data(col_values, indices)
-                    #print averaged_data
-                    averaged_data[col_name].append(av_data)
+def main():
+    import sys
 
-        return averaged_data
-
-    def _average_column(self, column, indices):
-        """
-        Returns average of all elements in list `column`
-        with given list of indices `indices`
-        """
-        l = [ column[i] for i in indices ]
-        return float(sum(l))/len(l)
-
-
-    def _clean_data(self, data, indices):
-        """
-        Removes elements from list `data` with given list of indices
-        `indices`
-        """
-        data[:] = [ item for i, item in enumerate(data) if i not in indices ]
-
-
-    def _calc_button_fired(self):
-        """
-        Handler for CalcButton clicked event
-        """
-        self._calc_curve_data(self.laser_min, self.laser_max)
-
-
-    def _refresh_button_fired(self):
-        """
-        Handler for CalcButton clicked event
-        """
-        self._file_name_changed(self.file_name)
-        self._calc_button_fired()
-
-
-    def _copy_button_fired(self):
-        """
-        Handler for CopyData Button clicked event
-        """
-
-        header_string = '\t'.join([key for key in self.avereged_data.keys()])
-        header_string += '\r\n'
-        data_string = ''
-
-        for index in range(len(self.avereged_data['delay'])):
-            for column_values in self.avereged_data.values():
-                data_string += str(column_values[index]) + '\t'
-            data_string += '\r\n'
-
-        import wx
-
-        data_obj = wx.TextDataObject(header_string + data_string)
-        if wx.TheClipboard.Open():
-            wx.TheClipboard.SetData(data_obj)
-            wx.TheClipboard.Close()
-        else:
-            wx.MessageBox("Unable to open the clipboard.", "Error")
-
-
-    def laser_window_changed(self):
-        """
-        Handler for laser_min and laser_max changes
-        """
-        self.rangeselect.selection = self.laser_min, self.laser_max
-
-    def move_right(self, info):
-        """
-        Handler for '>' key click
-        """
-        self.rangeselect.selection = self.laser_min + self.step,\
-                                     self.laser_max + self.step
-        self._calc_button_fired()
-
-
-    def move_left(self, info):
-        """
-        Handler for '<' key click
-        """
-        self.rangeselect.selection = self.laser_min - self.step,\
-                                     self.laser_max - self.step
-        self._calc_button_fired()
-
-    def calc_bind_fired(self, info):
-        """
-        Handler for 'm' key click
-        """
-        self._calc_button_fired()
+    app = QtGui.QApplication(sys.argv)
+    edp = MainWindow()
+    edp.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == '__main__':
-    window = Window()
-    window.configure_traits()
+    main()
+
