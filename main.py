@@ -152,11 +152,19 @@ class MainWindow(QtGui.QMainWindow):
     def _about(self):
         QtGui.QMessageBox.about(self, "About EDP", "fgsfds")
 
+    def _clear_all(self):
+        '''Clear all plots and selects'''
+        self.laser_plot.clear()
+        self._graph_select.clear()
+
     def _open(self):
+        from os.path import basename
         filename = QtGui.QFileDialog.getOpenFileName(self, filter="*.dat")
         if filename:
+            self._clear_all()
             self.data = pd.read_csv(filename, sep='\t', decimal=',')
             self.statusBar().showMessage("File loaded", 2000)
+            self.setWindowTitle("EDP - " + basename(filename))
             self._fill_graph_select()
             self._plot_hist()
             # except Exception as e:
@@ -193,15 +201,11 @@ class MainWindow(QtGui.QMainWindow):
                                               triggered=QtGui.qApp.aboutQt)
 
 
-def main():
+if __name__ == '__main__':
     import sys
 
     app = QtGui.QApplication(sys.argv)
     edp = MainWindow()
     edp.show()
     sys.exit(app.exec_())
-
-
-if __name__ == '__main__':
-    main()
 
