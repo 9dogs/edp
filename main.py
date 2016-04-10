@@ -40,6 +40,7 @@ class MainWindow(QtGui.QMainWindow):
 
         # Массив с данными
         self.data = pd.DataFrame()
+        self.data_filename = ""
 
         self._central_widget = QtGui.QWidget()
 
@@ -151,8 +152,15 @@ class MainWindow(QtGui.QMainWindow):
         self._graph_tabs_widget.addTab(fitting_stats_tab, 'Зависимость фита')
 
         # Фит репорт
-        self.fit_report_tab = QtGui.QTextEdit()
-        self._graph_tabs_widget.addTab(self.fit_report_tab, 'Отчет')
+        fit_report_widget = QtGui.QWidget()
+        report_layout = QtGui.QVBoxLayout()
+        self.fit_report_text = QtGui.QTextEdit()
+        save_report_btn = QtGui.QPushButton("Сохранить")
+        save_report_btn.clicked.connect(self._on_save_report_btn_clicked)
+        report_layout.addWidget(self.fit_report_text)
+        report_layout.addWidget(save_report_btn)
+        fit_report_widget.setLayout(report_layout)
+        self._graph_tabs_widget.addTab(fit_report_widget, 'Отчет')
 
         # Бины для гистограммы лазера
         self._bins_widget = QtGui.QDoubleSpinBox()
@@ -201,6 +209,12 @@ class MainWindow(QtGui.QMainWindow):
 
     def _on_tab_changed(self, tab):
         pass
+
+    def _on_save_report_btn_clicked(self):
+        report_filename = self.data_filename + ".report"
+        with open(report_filename, 'w') as report_file:
+            report_file.write("Fit report for: {}".format(self.data_filename))
+            report_file.write(self.fit_report_text.toPlainText())
 
     def _log_scale_changed(self, state):
         if state == 0:
@@ -311,7 +325,7 @@ class MainWindow(QtGui.QMainWindow):
         self._fitting_canvas.draw()
         self._fitting_figure.tight_layout()
         # Populating report
-        self.fit_report_tab.setText(result.fit_report())
+        self.fit_report_text.setText(result.fit_report())
         # Populating spinboxes
         self.y0_value.setValue(result.values['y0'])
         self.A_value.setValue(result.values['A'])
@@ -411,6 +425,7 @@ class MainWindow(QtGui.QMainWindow):
         from os.path import basename
         filename = QtGui.QFileDialog.getOpenFileName(self, filter="*.dat")
         if filename:
+            self.data_filename = filename
             self._clear_all()
             self.data = pd.read_csv(filename, sep='\t', decimal=',')
             self.statusBar().showMessage("File loaded", 2000)
