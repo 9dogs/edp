@@ -65,6 +65,11 @@ class MainWindow(QtGui.QMainWindow):
         self._select_region.setZValue(-10)
         self._select_region.sigRegionChanged.connect(self._calc_curve_data)
 
+        # Область выделения для фита
+        self._fit_region = pg.LinearRegionItem()
+        self._fit_region.setZValue(-10)
+        self._select_region.sigRegionChanged.connect(self._update_statusbar)
+
         # Посчитана ли статистика фита
         self._fit_stats = False
 
@@ -180,6 +185,7 @@ class MainWindow(QtGui.QMainWindow):
         # Кнопка фита
         self._fit_btn = QtGui.QPushButton("Фитировать")
         self._fit_btn.clicked.connect(self._on_fit_btn_clicked)
+        self._fit_btn.setToolTip("Shift+Click to calc t2-start fit dependency")
 
         # Галочка логарифмического масштаба
         self._log_checkbox = QtGui.QCheckBox("Лог. масштаб")
@@ -270,10 +276,10 @@ class MainWindow(QtGui.QMainWindow):
         # Adding to fit report
         self.fit_report_text.append("Зависимость t2 от точки старта фитирования:\n")
         self.fit_report_text.append(" ".join("{:.4f}: {:.2f}".format(x, y) for x, y in zip(x_array, t2_array)))
+        self.fit_report_text.append("\n")
 
     def _on_v_line_pos_changed(self):
         self._calc_curve_data()
-        # self.statusBar().showMessage("Мин. лазер: {:.2f}\tМакс. лазер: {:.2f}\tСредний: {:.2f}\tОтсеяно: {:.2f}%\tСигма: {:.2f}\tСтарт: {:.5f}".format(laser_min, laser_max, laser_mean, del_rows_count, laser_std, self._v_line.value()))
 
     def _on_copy_data_clicked(self):
         if not self.means.empty:
@@ -309,11 +315,13 @@ class MainWindow(QtGui.QMainWindow):
 
         # Check if x scale is log
         if self._log_checkbox.isChecked():
-            start_fit_from = 10**float(self._v_line.value())
+            fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]),
+                                  10 ** float(self._fit_region.getRegion()[1])]
         else:
-            start_fit_from = float(self._v_line.value())
-        fit_means = self.means[start_fit_from < self.means[DELAY_TITLE]]
-        fit_std = self.std[start_fit_from < self.std[DELAY_TITLE]]
+            fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
+        print(fit_start, fit_end)
+        fit_means = self.means[(fit_start < self.means[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
+        fit_std = self.std[(fit_start < self.std[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
 
         # Fit value
         fit_variable_name = self._graph_select.currentText()
@@ -324,13 +332,15 @@ class MainWindow(QtGui.QMainWindow):
         result = model.fit(fit_means[fit_variable_name], x=fit_means[DELAY_TITLE], params=params,
                            weights=1 / fit_std[LASER_TITLE] ** 2)
 
-        time = np.linspace(start_fit_from, self.means[DELAY_TITLE].max(), 1000)
+        time = np.linspace(fit_start, fit_end, 1000)
+        all_time = np.linspace(self.means[DELAY_TITLE].min(), self.means[DELAY_TITLE].max(), 2000)
 
         ax = self._fitting_figure.add_subplot(111)
         # plot data
         ax.errorbar(self.means[DELAY_TITLE], self.means[fit_variable_name], yerr=self.std[fit_variable_name],
                     fmt='o', capthick=2, ecolor='b', alpha=0.5)
-        ax.plot(time, echo_decay(x=time, **result.values), '--r', alpha=0.9)
+        ax.plot(time, echo_decay(x=time, **result.values), '-r', alpha=0.9)
+        ax.plot(all_time, echo_decay(x=all_time, **result.values), '--k', alpha=0.4)
         ax.set_title("$T_2$: {:0.2f}".format(result.values['t2']))
         # refresh canvas and tight layout
         self._fitting_canvas.draw()
@@ -344,7 +354,8 @@ class MainWindow(QtGui.QMainWindow):
 
     def _on_fit_btn_clicked(self):
         self._fit_data()
-        if not self._fit_stats:
+        modifiers = QtGui.QApplication.keyboardModifiers()
+        if modifiers == QtCore.Qt.ShiftModifier:
             self._calc_fit_start_dep_curve()
 
     def _update_line_pos(self):
@@ -402,20 +413,12 @@ class MainWindow(QtGui.QMainWindow):
         """
         Calculates data for echo plot
         """
-        laser_min, laser_max = self._select_region.getRegion()
+        self._laser_min, self._laser_max = self._select_region.getRegion()
         # Getting data between laser_min and laser_max
-        good_data = self.data[(float(laser_min) < self.data[LASER_TITLE]) & (self.data[LASER_TITLE] < float(laser_max))]
-        del_rows_count = (self.data.shape[0] - good_data.shape[0])/self.data.shape[0] * 100
-        laser_mean = good_data[LASER_TITLE].mean()
-        laser_std = good_data[LASER_TITLE].std()
-
-        if self._log_checkbox.isChecked():
-            start_fit_from = 10 ** float(self._v_line.value())
-        else:
-            start_fit_from = float(self._v_line.value())
-
-        self.statusBar().showMessage(
-            "Мин. лазер: {:.2f}\tМакс. лазер: {:.2f}\tСредний: {:.2f}\tОтсеяно: {:.2f}%\tСигма: {:.2f}\tСтарт: {:.5f}".format(laser_min, laser_max, laser_mean, del_rows_count, laser_std, start_fit_from))
+        good_data = self.data[(float(self._laser_min) < self.data[LASER_TITLE]) & (self.data[LASER_TITLE] < float(self._laser_max))]
+        self._del_rows_count = (self.data.shape[0] - good_data.shape[0])/self.data.shape[0] * 100
+        self._laser_mean = good_data[LASER_TITLE].mean()
+        self._laser_std = good_data[LASER_TITLE].std()
 
         averaged_data = good_data.groupby(DELAY_TITLE)
         self.means = averaged_data.mean().reset_index()
@@ -430,8 +433,17 @@ class MainWindow(QtGui.QMainWindow):
         err = pg.ErrorBarItem(x=self.means[DELAY_TITLE], y=self.means[self._graph_select.currentText()],
                               height=2*self.std[self._graph_select.currentText()], beam=0.5)
         # self.echo_plot.addItem(err)
-        self.echo_plot.addItem(self._v_line)
+        self._fit_region.setRegion([0, self.means[DELAY_TITLE].max()])
+        self.echo_plot.addItem(self._fit_region)
+        self._update_statusbar()
         # self._update_line_pos()
+
+    def _update_statusbar(self):
+        if self._log_checkbox.isChecked():
+            fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]), 10 ** float(self._fit_region.getRegion()[1])]
+        else:
+            fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
+        self.statusBar().showMessage("Мин. лазер: {:.2f}\tМакс. лазер: {:.2f}\tСредний: {:.2f}\tСигма: {:.2f}\tОтсеяно: {:.2f}%\tСтарт: {:.5f}\tСтоп: {:.5f}".format(self._laser_min, self._laser_max, self._laser_mean, self._laser_std, self._del_rows_count, fit_start, fit_end))
 
     def _about(self):
         QtGui.QMessageBox.about(self, "About EDP", "fgsfds")
