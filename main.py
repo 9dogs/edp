@@ -68,7 +68,7 @@ class MainWindow(QtGui.QMainWindow):
         # Область выделения для фита
         self._fit_region = pg.LinearRegionItem()
         self._fit_region.setZValue(-10)
-        self._select_region.sigRegionChanged.connect(self._update_statusbar)
+        self._fit_region.sigRegionChanged.connect(self._update_statusbar)
 
         # Посчитана ли статистика фита
         self._fit_stats = False
@@ -189,7 +189,7 @@ class MainWindow(QtGui.QMainWindow):
 
         # Галочка логарифмического масштаба
         self._log_checkbox = QtGui.QCheckBox("Лог. масштаб")
-        self._log_checkbox.stateChanged.connect(self._log_scale_changed)
+        self._log_checkbox.stateChanged.connect(self._on_log_scale_changed)
 
         # Галочка "нормировать на лазер"
         self._div_laser_checkbox = QtGui.QCheckBox("Норм. на лазер")
@@ -230,19 +230,25 @@ class MainWindow(QtGui.QMainWindow):
             report_file.write("Fit report for: {}".format(self.data_filename))
             report_file.write(self.fit_report_text.toPlainText())
 
-    def _log_scale_changed(self, state):
+    def _on_log_scale_changed(self, state):
         if state == 0:
             # Log scale unchecked
             self.echo_plot.setLogMode(x=False)
-            self._v_line.setValue(10**self._v_line.value())
+            fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]),
+                                  10 ** float(self._fit_region.getRegion()[1])]
+            self._fit_region.setRegion([fit_start, fit_end])
         elif state == 2:
             # Log scale checked
             self.echo_plot.setLogMode(x=True)
-            if self._v_line.value() <= 0:
-                new_line_pos = 1
+            fit_start, fit_end = self._fit_region.getRegion()
+            if fit_start <= 0:
+                fit_start = 0.01
+            if fit_end <= 0:
+                fit_end = 1
             else:
-                new_line_pos = np.log10(self._v_line.value())
-            self._v_line.setValue(new_line_pos)
+                fit_start = np.log10(fit_start)
+                fit_end = np.log10(fit_end)
+            self._fit_region.setRegion([fit_start, fit_end])
             self.echo_plot.setXRange(0, 3)
 
     def _calc_fit_start_dep_curve(self):
@@ -319,7 +325,6 @@ class MainWindow(QtGui.QMainWindow):
                                   10 ** float(self._fit_region.getRegion()[1])]
         else:
             fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
-        print(fit_start, fit_end)
         fit_means = self.means[(fit_start < self.means[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
         fit_std = self.std[(fit_start < self.std[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
 
@@ -339,9 +344,19 @@ class MainWindow(QtGui.QMainWindow):
         # plot data
         ax.errorbar(self.means[DELAY_TITLE], self.means[fit_variable_name], yerr=self.std[fit_variable_name],
                     fmt='o', capthick=2, ecolor='b', alpha=0.5)
-        ax.plot(time, echo_decay(x=time, **result.values), '-r', alpha=0.9)
+        ax.plot(time, echo_decay(x=time, **result.values), '-r', alpha=0.9, linewidth=2)
         ax.plot(all_time, echo_decay(x=all_time, **result.values), '--k', alpha=0.4)
-        ax.set_title("$T_2$: {:0.2f}".format(result.values['t2']))
+        ax.set_ylim([self.means[fit_variable_name].min() - self.std[fit_variable_name].mean(),
+                     self.means[fit_variable_name].max() + self.std[fit_variable_name].mean()])
+
+        # Подсчитываем данные
+        t2 = result.values['t2']
+        t2_stderr = result.params.get('t2').stderr
+        # Ширина линии в MHz
+        delta_f = 10**6/(np.pi*result.values['t2'])
+        delta_f_stderr = delta_f*t2_stderr/t2
+        ax.set_title("$T_2$: {:0.2f} $\pm$ {:0.2f} $ps$ ({:0.2f} $\pm$ {:0.2f} $MHz$ )".format(t2, t2_stderr,
+                                                                                               delta_f, delta_f_stderr))
         # refresh canvas and tight layout
         self._fitting_canvas.draw()
         self._fitting_figure.tight_layout()
@@ -433,7 +448,7 @@ class MainWindow(QtGui.QMainWindow):
         err = pg.ErrorBarItem(x=self.means[DELAY_TITLE], y=self.means[self._graph_select.currentText()],
                               height=2*self.std[self._graph_select.currentText()], beam=0.5)
         # self.echo_plot.addItem(err)
-        self._fit_region.setRegion([0, self.means[DELAY_TITLE].max()])
+        # self._fit_region.setRegion([0, 1])
         self.echo_plot.addItem(self._fit_region)
         self._update_statusbar()
         # self._update_line_pos()
