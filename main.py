@@ -182,14 +182,19 @@ class MainWindow(QtGui.QMainWindow):
         self._fit_btn.clicked.connect(self._on_fit_btn_clicked)
 
         # Галочка логарифмического масштаба
-        self._log_checkbox = QtGui.QCheckBox("Log scale")
+        self._log_checkbox = QtGui.QCheckBox("Лог. масштаб")
         self._log_checkbox.stateChanged.connect(self._log_scale_changed)
+
+        # Галочка "нормировать на лазер"
+        self._div_laser_checkbox = QtGui.QCheckBox("Норм. на лазер")
+        self._div_laser_checkbox.stateChanged.connect(self._div_laser_changed)
 
         # Layout для выбора графиков и бинов
         self._aux_layout = QtGui.QHBoxLayout()
         self._aux_layout.addWidget(self._bins_widget)
         self._aux_layout.addWidget(self._graph_select)
         self._aux_layout.addWidget(self._log_checkbox)
+        self._aux_layout.addWidget(self._div_laser_checkbox)
         self._aux_layout.addStretch(5)
         self._aux_layout.addWidget(self._fit_btn)
         self._aux_layout.addWidget(self._copy_data_btn)
@@ -209,6 +214,9 @@ class MainWindow(QtGui.QMainWindow):
 
     def _on_tab_changed(self, tab):
         pass
+
+    def _div_laser_changed(self, state):
+        self._calc_curve_data()
 
     def _on_save_report_btn_clicked(self):
         report_filename = self.data_filename + ".report"
@@ -259,6 +267,9 @@ class MainWindow(QtGui.QMainWindow):
         self._fitting_stats_canvas.draw()
         self._fitting_stats_figure.tight_layout()
         self._fit_stats = True
+        # Adding to fit report
+        self.fit_report_text.append("Зависимость t2 от точки старта фитирования:\n")
+        self.fit_report_text.append(" ".join("{:.4f}: {:.2f}".format(x, y) for x, y in zip(x_array, t2_array)))
 
     def _on_v_line_pos_changed(self):
         self._calc_curve_data()
@@ -325,7 +336,7 @@ class MainWindow(QtGui.QMainWindow):
         self._fitting_canvas.draw()
         self._fitting_figure.tight_layout()
         # Populating report
-        self.fit_report_text.setText(result.fit_report())
+        self.fit_report_text.append(result.fit_report())
         # Populating spinboxes
         self.y0_value.setValue(result.values['y0'])
         self.A_value.setValue(result.values['A'])
@@ -353,6 +364,11 @@ class MainWindow(QtGui.QMainWindow):
     def _on_region_changed(self):
         pass
 
+    def _reset_fit_initials(self):
+        self.y0_value.setValue(5000)
+        self.t2_value.setValue(500)
+        self.A_value.setValue(500)
+
     def _on_bins_value_changed(self):
         """
         Функция срабатывает при изменении бинов
@@ -367,11 +383,15 @@ class MainWindow(QtGui.QMainWindow):
             self.laser_plot.addItem(self._select_region)
 
     def _create_menu(self):
-        self._file_menu = self.menuBar().addMenu("&File")
+        self._file_menu = self.menuBar().addMenu("&Файл")
         self._file_menu.addAction(self._open_action)
         self._file_menu.addAction(self._exit_action)
 
-        self._help_menu = self.menuBar().addMenu("&Help")
+        self._fit_menu = self.menuBar().addMenu("&Фитинг")
+        self._fit_menu.addAction(self._fit_action)
+        self._fit_menu.addAction(self._reset_initials_action)
+
+        self._help_menu = self.menuBar().addMenu("&Помощь")
         self._help_menu.addAction(self._about_action)
         self._help_menu.addAction(self._about_qt_action)
 
@@ -399,16 +419,19 @@ class MainWindow(QtGui.QMainWindow):
 
         averaged_data = good_data.groupby(DELAY_TITLE)
         self.means = averaged_data.mean().reset_index()
+        # Divided by laser
+        self.means['normed'] = self.means[self._graph_select.currentText()] / self.means[LASER_TITLE]
         self.std = averaged_data.std().reset_index()
         self.count = averaged_data.count().reset_index()
 
         self.echo_plot.clear()
-        self.echo_plot.plot(self.means[DELAY_TITLE], self.means[self._graph_select.currentText()], pen=(200, 200, 200), symbolBrush=(230, 0, 0, 0.8*255), symbolPen='w')
+        plot_column = 'normed' if self._div_laser_checkbox.isChecked() else self._graph_select.currentText()
+        self.echo_plot.plot(self.means[DELAY_TITLE], self.means[plot_column], pen=(200, 200, 200), symbolBrush=(230, 0, 0, 0.8*255), symbolPen='w')
         err = pg.ErrorBarItem(x=self.means[DELAY_TITLE], y=self.means[self._graph_select.currentText()],
                               height=2*self.std[self._graph_select.currentText()], beam=0.5)
-        #self.echo_plot.addItem(err)
+        # self.echo_plot.addItem(err)
         self.echo_plot.addItem(self._v_line)
-        self._update_line_pos()
+        # self._update_line_pos()
 
     def _about(self):
         QtGui.QMessageBox.about(self, "About EDP", "fgsfds")
@@ -420,6 +443,7 @@ class MainWindow(QtGui.QMainWindow):
         self._fit_stats = False
         self._fitting_figure.clear()
         self._fitting_stats_figure.clear()
+        self.fit_report_text.clear()
 
     def _open(self):
         from os.path import basename
@@ -466,6 +490,12 @@ class MainWindow(QtGui.QMainWindow):
         self._about_qt_action = QtGui.QAction("About &Qt", self,
                                               statusTip="Show the Qt library's About box",
                                               triggered=QtGui.qApp.aboutQt)
+
+        self._fit_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'), "&Fit", self,
+                                         statusTip="Fit current data", triggered=self._on_fit_btn_clicked)
+
+        self._reset_initials_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'), "&Reset initials", self,
+                                         statusTip="Reset fit starting values to default ones", triggered=self._reset_fit_initials)
 
 
 if __name__ == '__main__':
