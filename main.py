@@ -315,9 +315,8 @@ class MainWindow(QtGui.QMainWindow):
         return params
 
     def _fit_data(self):
-        # clean plots
+        # clean plot
         self._fitting_figure.clear()
-        self._fitting_stats_figure.clear()
 
         # Check if x scale is log
         if self._log_checkbox.isChecked():
