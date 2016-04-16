@@ -253,6 +253,7 @@ class MainWindow(QtGui.QMainWindow):
 
     def _calc_fit_start_dep_curve(self):
         t2_array = []
+        t2_var_array = []
         x_array = []
         # Fit value
         fit_variable_name = self._graph_select.currentText()
@@ -268,12 +269,15 @@ class MainWindow(QtGui.QMainWindow):
                 result = model.fit(fit_means[fit_variable_name], x=fit_means[DELAY_TITLE],
                                    params=params, weights=1 / fit_std[LASER_TITLE] ** 2)
                 t2_array.append(result.params.get('t2').value)
+                t2_var_array.append(result.params.get('t2').stderr)
                 x_array.append(start_fit_from)
             except TypeError:
                 break
 
         ax = self._fitting_stats_figure.add_subplot(111)
-        ax.plot(x_array, t2_array, '--bo', alpha=0.9)
+        ax.errorbar(x_array, t2_array, yerr=t2_var_array, fmt='--bo', capthick=2, ecolor='b', alpha=0.9)
+        ax.set_xlim([-10, 100])
+        ax.set_ylim([0, 2000])
         ax.set_title("Зависимость $T_2$ от точки старта фитирования")
         # refresh canvas and tight layout
         self._fitting_stats_canvas.draw()
