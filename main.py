@@ -5,29 +5,112 @@ Echo data calculation software
 # Major library imports
 import numpy as np
 import pandas as pd
+from PyQt5 import QtCore, QtWidgets, QtGui
 
-from pyqtgraph.Qt import QtGui, QtCore
+from os.path import basename
 import pyqtgraph as pg
 
-from matplotlib.backends.backend_qt4agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt4agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 import matplotlib.pyplot as plt
 
+from lmfit.models import LorentzianModel, ConstantModel, Model, GaussianModel
+from lmfit.parameter import Parameters, Parameter
 
-from lmfit import Model, Parameters
+from fitting.fit import fit_df, echo_decay_curve, prepare_data, PEAK_MODELS
+
 import seaborn as sns
 sns.set(style="whitegrid")
 
 
-LASER_TITLE = 'Laser'
-DELAY_TITLE = 'Time'
+LASER_TITLE = 'laser'
+DELAY_TITLE = 'time'
 
 
-def echo_decay(x, y0, A, t2):
-    return y0 + A*np.exp(-4 * x / t2)
+class ParamWidget(QtWidgets.QWidget):
+    def __init__(self, name, display_name=None, val=0, vary=True, min=-np.inf, max=np.inf):
+        super().__init__(parent=None, flags=QtCore.Qt.Widget)
+        self._name = name
+        self._display_name = display_name if display_name else name
+        self._min = min
+        self._max = max
+        self._val = val
+        self.vary = vary
+        self.param = Parameter(name, val, vary, min, max)
+
+        self._label = QtWidgets.QLabel(self._display_name)
+        self._min_edit = QtWidgets.QDoubleSpinBox(self)
+        self._max_edit = QtWidgets.QDoubleSpinBox(self)
+        self._val_edit = QtWidgets.QDoubleSpinBox(self)
+
+        self._set_spinboxes([self._min_edit, self._max_edit, self._val_edit])
+
+        self._vary_checkbox = QtWidgets.QCheckBox(self)
+        self._vary_checkbox.setChecked(True)
+        self._vary_checkbox.setStyleSheet("""
+             QCheckBox::indicator {
+                 width: 16px;
+                 height: 16px;
+             }
+            QCheckBox::indicator:checked
+              {
+                image: url(resources/icons/unlocked.png);
+              }
+              QCheckBox::indicator:unchecked
+              {
+                image: url(resources/icons/locked.png);
+              }
+        """)
+        self._vary_checkbox.stateChanged.connect(self._update_parameter)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.addWidget(self._label)
+        layout.addWidget(QtWidgets.QLabel('('))
+        layout.addWidget(self._min_edit)
+        layout.addWidget(QtWidgets.QLabel(','))
+        layout.addWidget(self._max_edit)
+        layout.addWidget(QtWidgets.QLabel(');'))
+        layout.addWidget(self._val_edit)
+        layout.addWidget(self._vary_checkbox)
+
+        self.setMaximumWidth(250)
+
+    def _set_spinboxes(self, spinboxes):
+        for spin in spinboxes:
+            spin.setMaximum(99999)
+            spin.setMinimum(-99999)
+            spin.setSingleStep(1)
+            spin.setButtonSymbols(2)
+            spin.valueChanged.connect(self._update_parameter)
+
+    def _update_parameter(self):
+        val = self._val_edit.value()
+        min_val = self._min_edit.value()
+        max_val = self._max_edit.value()
+        vary = True if self._vary_checkbox.isChecked() else False
+        try:
+            self.param = Parameter(self._name, val, vary, min_val, max_val)
+        except ValueError as e:
+            self.param = Parameter(self._name, val, vary)
+            #self.statusBar().showMessage("{}, min and max keep unchanged".format(e))
+
+    def from_res(self, res):
+        val = res.best_values.get(self._name)
+        self._val_edit.setValue(val)
 
 
-class MainWindow(QtGui.QMainWindow):
+    @property
+    def value(self):
+        return self._val
+
+    @value.setter
+    def value(self, value):
+        self._val = value
+        self._val_edit.setValue(value)
+        self._update_parameter()
+
+
+class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
 
@@ -42,13 +125,13 @@ class MainWindow(QtGui.QMainWindow):
         self.data = pd.DataFrame()
         self.data_filename = ""
 
-        self._central_widget = QtGui.QWidget()
+        self._central_widget = QtWidgets.QWidget()
 
-        self._graph_tabs_widget = QtGui.QTabWidget()
+        self._graph_tabs_widget = QtWidgets.QTabWidget()
         self._graph_tabs_widget.currentChanged.connect(self._on_tab_changed)
 
-        self._main_layout = QtGui.QHBoxLayout()
-        self._pyqtgraph_layout = QtGui.QVBoxLayout()
+        self._main_layout = QtWidgets.QHBoxLayout()
+        self._pyqtgraph_layout = QtWidgets.QVBoxLayout()
 
         # GraphLayoutWidget с двумя графиками: гистограмма лазера и эхо
         self._plot_area = pg.GraphicsLayoutWidget()
@@ -57,8 +140,13 @@ class MainWindow(QtGui.QMainWindow):
         self.echo_plot = self._plot_area.addPlot()
 
         # ComboBox для выбора графика
-        self._graph_select = QtGui.QComboBox()
+        self._graph_select = QtWidgets.QComboBox()
         self._graph_select.currentIndexChanged.connect(self._calc_curve_data)
+
+        # ComboBox для выбора модели фита
+        self._peak_model_select = QtWidgets.QComboBox()
+        self._peak_model_select.addItems(PEAK_MODELS.keys())
+        self._peak_model_select.addItem('Echo')
 
         # Область выделения
         self._select_region = pg.LinearRegionItem()
@@ -76,80 +164,63 @@ class MainWindow(QtGui.QMainWindow):
         # Результирующие графики
 
         # График фита
-        fitting_tab = QtGui.QWidget()
+        fitting_tab = QtWidgets.QWidget()
         # a figure instance to plot on
         self._fitting_figure = plt.figure()
         self._fitting_canvas = FigureCanvas(self._fitting_figure)
+        self._ax = self._fitting_figure.add_subplot(111)
         # toolbar
         fitting_toolbar = NavigationToolbar(self._fitting_canvas, self)
         # fit parameters
-        params_layout = QtGui.QHBoxLayout()
-        # y0
-        y0_form = QtGui.QFormLayout()
-        self.y0_min, self.y0_max, self.y0_value, self.y0_fixed = QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QCheckBox()
-        for spin_box in [self.y0_min, self.y0_max, self.y0_value]:
-            spin_box.setMaximum(99999)
-            spin_box.setMinimum(-99999)
-            spin_box.setSingleStep(0.001)
-        y0_form.addRow(QtGui.QLabel("y0 (~5000)"))
-        y0_form.addRow("Min", self.y0_min)
-        y0_form.addRow("Max", self.y0_max)
-        y0_form.addRow("Value", self.y0_value)
-        y0_form.addRow("Fixed?", self.y0_fixed)
+        params_layout = QtWidgets.QGridLayout()
 
-        params_layout.addLayout(y0_form)
-
-        # A
-        A_form = QtGui.QFormLayout()
-        self.A_min, self.A_max, self.A_value, self.A_fixed = QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QCheckBox()
-        for spin_box in [self.A_min, self.A_max, self.A_value]:
-            spin_box.setMaximum(99999)
-            spin_box.setMinimum(-99999)
-            spin_box.setSingleStep(0.001)
-        A_form.addRow(QtGui.QLabel("A (~500)"))
-        A_form.addRow("Min", self.A_min)
-        A_form.addRow("Max", self.A_max)
-        A_form.addRow("Value", self.A_value)
-        A_form.addRow("Fixed?", self.A_fixed)
-
-        params_layout.addLayout(A_form)
-
-        # t2
-        t2_form = QtGui.QFormLayout()
-        self.t2_min, self.t2_max, self.t2_value, self.t2_fixed = QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QDoubleSpinBox(), QtGui.QCheckBox()
-        for spin_box in [self.t2_min, self.t2_max, self.t2_value]:
-            spin_box.setMaximum(99999)
-            spin_box.setMinimum(-99999)
-            spin_box.setSingleStep(0.001)
-        t2_form.addRow(QtGui.QLabel("t2 (~500)"))
-        t2_form.addRow("Min", self.t2_min)
-        t2_form.addRow("Max", self.t2_max)
-        t2_form.addRow("Value", self.t2_value)
-        t2_form.addRow("Fixed?", self.t2_fixed)
-
-        params_layout.addLayout(t2_form)
-
+        # Echo params
+        self.y0 = ParamWidget('y0')
+        self.A = ParamWidget('A')
+        self.t2 = ParamWidget('t2')
         # Initial guesses
-        self.y0_value.setValue(5000)
-        self.A_value.setValue(500)
-        self.t2_value.setValue(500)
+        self.y0.value = 5000
+        self.A.value = 500
+        self.t2.value = 500
 
-        fit_layout = QtGui.QVBoxLayout()
-        fit_layout.addWidget(fitting_toolbar)
-        fit_layout.addWidget(self._fitting_canvas)
-        fit_layout.addLayout(params_layout)
+        # Peak params
+        self.amp = ParamWidget('peak_amplitude', 'Amp')
+        self.center = ParamWidget('peak_center', 'Center')
+        self.sigma = ParamWidget('peak_sigma', 'Sigma')
+        self.c = ParamWidget('const_c', 'Const')
+        # Initial guesses
+        self.amp.value = 10000
+        self.center.value = 0
+        self.sigma.value = 5
+        self.c.value = 5000
+
+        params_layout.addWidget(self.amp, 0, 0)
+        params_layout.addWidget(self.center, 1, 0)
+        params_layout.addWidget(self.sigma, 2, 0)
+        params_layout.addWidget(self.c, 3, 0)
+
+        params_layout.addWidget(self.y0, 0, 1)
+        params_layout.addWidget(self.A, 1, 1)
+        params_layout.addWidget(self.t2, 2, 1)
+
+        params_layout.setVerticalSpacing(0)
+
+        fit_layout = QtWidgets.QVBoxLayout()
+        fit_layout.addWidget(fitting_toolbar, 2)
+        fit_layout.addWidget(self._fitting_canvas, 6)
+        fit_layout.addLayout(params_layout, 1)
         fitting_tab.setLayout(fit_layout)
 
         self._graph_tabs_widget.addTab(fitting_tab, 'Фит')
 
         # График зависимости t2 от точки старта фита
-        fitting_stats_tab = QtGui.QWidget()
+        fitting_stats_tab = QtWidgets.QWidget()
         # a figure instance to plot on
         self._fitting_stats_figure = plt.figure()
         self._fitting_stats_canvas = FigureCanvas(self._fitting_stats_figure)
         fitting_stats_toolbar = NavigationToolbar(self._fitting_stats_canvas, self)
 
-        fit_stats_layout = QtGui.QVBoxLayout()
+        fit_stats_layout = QtWidgets.QVBoxLayout()
         fit_stats_layout.addWidget(fitting_stats_toolbar)
         fit_stats_layout.addWidget(self._fitting_stats_canvas)
         fitting_stats_tab.setLayout(fit_stats_layout)
@@ -157,10 +228,10 @@ class MainWindow(QtGui.QMainWindow):
         self._graph_tabs_widget.addTab(fitting_stats_tab, 'Зависимость фита')
 
         # Фит репорт
-        fit_report_widget = QtGui.QWidget()
-        report_layout = QtGui.QVBoxLayout()
-        self.fit_report_text = QtGui.QTextEdit()
-        save_report_btn = QtGui.QPushButton("Сохранить")
+        fit_report_widget = QtWidgets.QWidget()
+        report_layout = QtWidgets.QVBoxLayout()
+        self.fit_report_text = QtWidgets.QTextEdit()
+        save_report_btn = QtWidgets.QPushButton("Сохранить")
         save_report_btn.clicked.connect(self._on_save_report_btn_clicked)
         report_layout.addWidget(self.fit_report_text)
         report_layout.addWidget(save_report_btn)
@@ -168,7 +239,7 @@ class MainWindow(QtGui.QMainWindow):
         self._graph_tabs_widget.addTab(fit_report_widget, 'Отчет')
 
         # Бины для гистограммы лазера
-        self._bins_widget = QtGui.QDoubleSpinBox()
+        self._bins_widget = QtWidgets.QDoubleSpinBox()
         self._bins_widget.setMinimum(1)
         self._bins_widget.setMaximum(1000)
         self._bins_widget.setValue(200)
@@ -179,29 +250,30 @@ class MainWindow(QtGui.QMainWindow):
         self._v_line.sigPositionChangeFinished.connect(self._on_v_line_pos_changed)
 
         # Кпопка копирования в буфер
-        self._copy_data_btn = QtGui.QPushButton("Скопировать в буфер")
+        self._copy_data_btn = QtWidgets.QPushButton("Скопировать в буфер")
         self._copy_data_btn.clicked.connect(self._on_copy_data_clicked)
 
         # Кнопка фита
-        self._fit_btn = QtGui.QPushButton("Фитировать")
+        self._fit_btn = QtWidgets.QPushButton("Фитировать")
         self._fit_btn.clicked.connect(self._on_fit_btn_clicked)
         self._fit_btn.setToolTip("Shift+Click to calc t2-start fit dependency")
 
         # Галочка логарифмического масштаба
-        self._log_checkbox = QtGui.QCheckBox("Лог. масштаб")
+        self._log_checkbox = QtWidgets.QCheckBox("Лог. масштаб")
         self._log_checkbox.stateChanged.connect(self._on_log_scale_changed)
 
         # Галочка "нормировать на лазер"
-        self._div_laser_checkbox = QtGui.QCheckBox("Норм. на лазер")
+        self._div_laser_checkbox = QtWidgets.QCheckBox("Норм. на лазер")
         self._div_laser_checkbox.stateChanged.connect(self._div_laser_changed)
 
         # Layout для выбора графиков и бинов
-        self._aux_layout = QtGui.QHBoxLayout()
+        self._aux_layout = QtWidgets.QHBoxLayout()
         self._aux_layout.addWidget(self._bins_widget)
         self._aux_layout.addWidget(self._graph_select)
         self._aux_layout.addWidget(self._log_checkbox)
         self._aux_layout.addWidget(self._div_laser_checkbox)
         self._aux_layout.addStretch(5)
+        self._aux_layout.addWidget(self._peak_model_select)
         self._aux_layout.addWidget(self._fit_btn)
         self._aux_layout.addWidget(self._copy_data_btn)
 
@@ -209,10 +281,16 @@ class MainWindow(QtGui.QMainWindow):
         self._pyqtgraph_layout.addLayout(self._aux_layout)
 
         # Установка лэйаутов
-        self._main_layout.addLayout(self._pyqtgraph_layout)
-        self._main_layout.addWidget(self._graph_tabs_widget)
-        self._central_widget.setLayout(self._main_layout)
-        self.setCentralWidget(self._central_widget)
+        self._splitter = QtWidgets.QSplitter(self)
+        w = QtWidgets.QWidget()
+        w.setLayout(self._pyqtgraph_layout)
+        self._splitter.addWidget(w)
+        self._splitter.addWidget(self._graph_tabs_widget)
+        # self._main_layout.addLayout(self._pyqtgraph_layout)
+        # self._main_layout.addWidget(self._graph_tabs_widget)
+        # self._central_widget.setLayout(self._main_layout)
+        # self.setCentralWidget(self._central_widget)
+        self.setCentralWidget(self._splitter)
 
         self._create_actions()
         self._create_menu()
@@ -264,7 +342,7 @@ class MainWindow(QtGui.QMainWindow):
 
             params = self._init_params()
 
-            model = Model(echo_decay, independent_vars=['x'])
+            model = Model(echo_decay_curve, independent_vars=['x'])
             try:
                 result = model.fit(fit_means[fit_variable_name], x=fit_means[DELAY_TITLE],
                                    params=params, weights=1 / fit_std[LASER_TITLE] ** 2)
@@ -318,9 +396,9 @@ class MainWindow(QtGui.QMainWindow):
 
         return params
 
-    def _fit_data(self):
+    def _fit_echo(self):
         # clean plot
-        self._fitting_figure.clear()
+        # self._fitting_figure.clear()
 
         # Check if x scale is log
         if self._log_checkbox.isChecked():
@@ -328,29 +406,31 @@ class MainWindow(QtGui.QMainWindow):
                                   10 ** float(self._fit_region.getRegion()[1])]
         else:
             fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
-        fit_means = self.means[(fit_start < self.means[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
-        fit_std = self.std[(fit_start < self.std[DELAY_TITLE]) & (self.means[DELAY_TITLE] < fit_end)]
 
-        # Fit value
-        fit_variable_name = self._graph_select.currentText()
+        # Fit arrays
+        all_x = np.array(self.data.index.get_values())
+        x = np.array(self.data_in_range.index.get_values())
+        if 'res' in self.data_in_range:
+            y = self.data_in_range['res']
+        else:
+            y = self.data_in_range[self._graph_select.currentText() + '_mean']
 
-        params = self._init_params()
+        params = Parameters()
+        params.add_many(
+            ('y0', self.y0.param.value, self.y0.param.vary, self.y0.param.min, self.y0.param.max),
+            ('A', self.A.param.value, self.A.param.vary, self.A.param.min, self.center.param.max),
+            ('t2', self.t2.param.value, self.t2.param.vary, self.t2.param.min, self.t2.param.max),
+        )
+        model = Model(echo_decay_curve, independent_vars=['x'])
 
-        model = Model(echo_decay, independent_vars=['x'])
-        result = model.fit(fit_means[fit_variable_name], x=fit_means[DELAY_TITLE], params=params,
-                           weights=1 / fit_std[LASER_TITLE] ** 2)
+        result = model.fit(y, x=x, params=params)
 
-        time = np.linspace(fit_start, fit_end, 1000)
-        all_time = np.linspace(self.means[DELAY_TITLE].min(), self.means[DELAY_TITLE].max(), 2000)
+        time = np.arange(fit_start, fit_end, 0.001)
+        all_time = np.linspace(x.min(), x.max(), 2000)
 
-        ax = self._fitting_figure.add_subplot(111)
         # plot data
-        ax.errorbar(self.means[DELAY_TITLE], self.means[fit_variable_name], yerr=self.std[fit_variable_name],
-                    fmt='o', capthick=2, ecolor='b', alpha=0.5)
-        ax.plot(time, echo_decay(x=time, **result.values), '-r', alpha=0.9, linewidth=2)
-        ax.plot(all_time, echo_decay(x=all_time, **result.values), '--k', alpha=0.4)
-        ax.set_ylim([self.means[fit_variable_name].min() - self.std[fit_variable_name].mean(),
-                     self.means[fit_variable_name].max() + self.std[fit_variable_name].mean()])
+        self._ax.plot(time, echo_decay_curve(x=time, **result.values), '-r', alpha=0.9, linewidth=2)
+        self._ax.plot(all_time, echo_decay_curve(x=all_time, **result.values), '--k', alpha=0.4)
 
         # Подсчитываем данные
         t2 = result.values['t2']
@@ -358,7 +438,7 @@ class MainWindow(QtGui.QMainWindow):
         # Ширина линии в MHz
         delta_f = 10**6/(np.pi*result.values['t2'])
         delta_f_stderr = delta_f*t2_stderr/t2
-        ax.set_title("$T_2$: {:0.2f} $\pm$ {:0.2f} $ps$ ({:0.2f} $\pm$ {:0.2f} $MHz$ )".format(t2, t2_stderr,
+        self._ax.set_title("$T_2$: {:0.2f} $\pm$ {:0.2f} $ps$ ({:0.2f} $\pm$ {:0.2f} $MHz$ )".format(t2, t2_stderr,
                                                                                                delta_f, delta_f_stderr))
         # refresh canvas and tight layout
         self._fitting_canvas.draw()
@@ -366,15 +446,64 @@ class MainWindow(QtGui.QMainWindow):
         # Populating report
         self.fit_report_text.append(result.fit_report())
         # Populating spinboxes
-        self.y0_value.setValue(result.values['y0'])
-        self.A_value.setValue(result.values['A'])
-        self.t2_value.setValue(result.values['t2'])
+        self.y0.from_res(result)
+        self.A.from_res(result)
+        self.t2.from_res(result)
+
+    def _fit_peak(self):
+        model = PEAK_MODELS[self._peak_model_select.currentText()]
+
+        # Check if x scale is log
+        if self._log_checkbox.isChecked():
+            fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]),
+                                  10 ** float(self._fit_region.getRegion()[1])]
+        else:
+            fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
+
+        #print(fit_start, fit_end, self.data[self._graph_select.currentText()])
+        #print(self.data_in_range.head())
+        field_name = self._graph_select.currentText() + '_mean'
+        params = Parameters()
+        params.add_many(
+            ('peak_amplitude', self.amp.param.value, self.amp.param.vary, self.amp.param.min, self.amp.param.max),
+            ('peak_center', self.center.param.value, self.center.param.vary, self.center.param.min, self.center.param.max),
+            ('peak_sigma', self.sigma.param.value, self.sigma.param.vary, self.sigma.param.min, self.sigma.param.max),
+            ('const_c', self.c.param.value, self.c.param.vary, self.c.param.min, self.c.param.max),
+        )
+
+        df, res = fit_df(self.data_in_range, params=params, model=model, fit_range=(fit_start, fit_end), fit_field=field_name)
+        self.amp.from_res(res)
+        self.center.from_res(res)
+        self.sigma.from_res(res)
+        self.c.from_res(res)
+
+        self.data_in_range['res'] = df.peak_fit_res
+
+        x = np.array(df.index.get_values())
+        y = np.array(df.peak_fit.values)
+        self._fitting_figure.clear()
+        self._ax = self._fitting_figure.add_subplot(111)
+        # plot data
+        self._ax.plot(x, df[field_name], '.')
+        # plot fit
+        fit_x = np.arange(x.min(), x.max(), 0.001)
+        fit_y = res.eval(x=fit_x)
+        self._ax.plot(fit_x, fit_y, '-', alpha=0.7, linewidth=2)
+        self._ax.plot(x, df.peak_fit_res + self.c.param.value, '.', alpha=0.7)
+        self._ax.set_xlim([fit_start, fit_end])
+        # refresh canvas and tight layout
+        self._fitting_canvas.draw()
+        self._fitting_figure.tight_layout()
 
     def _on_fit_btn_clicked(self):
-        self._fit_data()
-        modifiers = QtGui.QApplication.keyboardModifiers()
-        if modifiers == QtCore.Qt.ShiftModifier:
-            self._calc_fit_start_dep_curve()
+        if self._peak_model_select.currentText() == 'Echo':
+            self._fit_echo()
+            modifiers = QtWidgets.QApplication.keyboardModifiers()
+            if modifiers == QtCore.Qt.ShiftModifier:
+                self._calc_fit_start_dep_curve()
+
+        else:
+            self._fit_peak()
 
     def _update_line_pos(self):
         try:
@@ -387,16 +516,23 @@ class MainWindow(QtGui.QMainWindow):
         Функция заполняет ComboBox названиями колонок из данных
         """
         if not self.data.empty:
-            for item in self.data.columns:
-                self._graph_select.addItem(item)
+            cols = [x for x in self.data.columns if x != 'time']
+            self._graph_select.addItems(cols)
 
     def _on_region_changed(self):
         pass
 
     def _reset_fit_initials(self):
-        self.y0_value.setValue(5000)
-        self.t2_value.setValue(500)
-        self.A_value.setValue(500)
+        # Initial guesses
+        self.y0.value = 5000
+        self.A.value = 500
+        self.t2.value = 500
+
+        # Initial guesses
+        self.amp.value = 10000
+        self.center.value = 0
+        self.sigma.value = 5
+        self.c.value = 5000
 
     def _on_bins_value_changed(self):
         """
@@ -433,23 +569,23 @@ class MainWindow(QtGui.QMainWindow):
         """
         self._laser_min, self._laser_max = self._select_region.getRegion()
         # Getting data between laser_min and laser_max
-        good_data = self.data[(float(self._laser_min) < self.data[LASER_TITLE]) & (self.data[LASER_TITLE] < float(self._laser_max))]
-        self._del_rows_count = (self.data.shape[0] - good_data.shape[0])/self.data.shape[0] * 100
-        self._laser_mean = good_data[LASER_TITLE].mean()
-        self._laser_std = good_data[LASER_TITLE].std()
+        self.data_in_range = prepare_data(self.data, laser_window=(self._laser_min, self._laser_max),
+                                          laser_title=LASER_TITLE, time_title=DELAY_TITLE)
 
-        averaged_data = good_data.groupby(DELAY_TITLE)
-        self.means = averaged_data.mean().reset_index()
+        selected_graph = self._graph_select.currentText() + '_mean'
+
+        self._del_rows_count = (self.data.shape[0] - self.data_in_range.shape[0])/self.data.shape[0] * 100
+        self._laser_mean = self.data_in_range[LASER_TITLE + '_mean'].mean()
+        self._laser_std = self.data_in_range[LASER_TITLE + '_mean'].std()
+
         # Divided by laser
-        self.means['normed'] = self.means[self._graph_select.currentText()] / self.means[LASER_TITLE]
-        self.std = averaged_data.std().reset_index()
-        self.count = averaged_data.count().reset_index()
+        self.data_in_range['normed'] = self.data_in_range[selected_graph] / self.data_in_range[LASER_TITLE + '_mean']
 
         self.echo_plot.clear()
-        plot_column = 'normed' if self._div_laser_checkbox.isChecked() else self._graph_select.currentText()
-        self.echo_plot.plot(self.means[DELAY_TITLE], self.means[plot_column], pen=(200, 200, 200), symbolBrush=(230, 0, 0, 0.8*255), symbolPen='w')
-        err = pg.ErrorBarItem(x=self.means[DELAY_TITLE], y=self.means[self._graph_select.currentText()],
-                              height=2*self.std[self._graph_select.currentText()], beam=0.5)
+        plot_column = 'normed' if self._div_laser_checkbox.isChecked() else selected_graph
+        self.echo_plot.plot(self.data_in_range.index.get_values(), self.data_in_range[plot_column], pen=(200, 200, 200), symbolBrush=(230, 0, 0, 0.8*255), symbolPen='w', symbolSize=3)
+        err = pg.ErrorBarItem(x=self.data_in_range.index.get_values(), y=self.data_in_range[selected_graph],
+                              height=2*self.data_in_range[self._graph_select.currentText() + '_std'], beam=0.5)
         # self.echo_plot.addItem(err)
         # self._fit_region.setRegion([0, 1])
         self.echo_plot.addItem(self._fit_region)
@@ -464,7 +600,7 @@ class MainWindow(QtGui.QMainWindow):
         self.statusBar().showMessage("Мин. лазер: {:.2f}\tМакс. лазер: {:.2f}\tСредний: {:.2f}\tСигма: {:.2f}\tОтсеяно: {:.2f}%\tСтарт: {:.5f}\tСтоп: {:.5f}".format(self._laser_min, self._laser_max, self._laser_mean, self._laser_std, self._del_rows_count, fit_start, fit_end))
 
     def _about(self):
-        QtGui.QMessageBox.about(self, "About EDP", "fgsfds")
+        QtWidgets.QMessageBox.about(self, "About EDP", "fgsfds")
 
     def _clear_all(self):
         """Clear all plots and selects"""
@@ -476,14 +612,15 @@ class MainWindow(QtGui.QMainWindow):
         self.fit_report_text.clear()
 
     def _open(self):
-        from os.path import basename
-        filename = QtGui.QFileDialog.getOpenFileName(self, filter="*.dat")
+        filename = QtWidgets.QFileDialog.getOpenFileName(self, filter="*.dat")
         if filename:
-            self.data_filename = filename
+            self.data_filename = filename[0]
             self._clear_all()
-            self.data = pd.read_csv(filename, sep='\t', decimal=',')
+            self.data = pd.read_csv(self.data_filename, sep='\t', decimal=',')
+            # Pull column name to lower
+            self.data.columns = [c.lower() for c in self.data.columns]
             self.statusBar().showMessage("File loaded", 2000)
-            self.setWindowTitle("EDP - " + basename(filename))
+            self.setWindowTitle("EDP - " + basename(self.data_filename))
             self._fill_graph_select()
             self._plot_hist()
             self._calc_curve_data()
@@ -504,34 +641,33 @@ class MainWindow(QtGui.QMainWindow):
 
     def _create_actions(self):
 
-        self._open_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'),
+        self._open_action = QtWidgets.QAction(QtGui.QIcon(':/images/open.png'),
                                           "&Open...", self, shortcut=QtGui.QKeySequence.Open,
                                           statusTip="Open an existing file", triggered=self._open)
 
-        self._exit_action = QtGui.QAction("E&xit", self,
+        self._exit_action = QtWidgets.QAction("E&xit", self,
                                           shortcut=QtGui.QKeySequence.Quit,
                                           statusTip="Exit the application",
-                                          triggered=QtGui.qApp.closeAllWindows)
+                                          triggered=QtWidgets.qApp.closeAllWindows)
 
-        self._about_action = QtGui.QAction("&About", self,
+        self._about_action = QtWidgets.QAction("&About", self,
                                            statusTip="Show the application's About box",
                                            triggered=self._about)
 
-        self._about_qt_action = QtGui.QAction("About &Qt", self,
+        self._about_qt_action = QtWidgets.QAction("About &Qt", self,
                                               statusTip="Show the Qt library's About box",
-                                              triggered=QtGui.qApp.aboutQt)
+                                              triggered=QtWidgets.qApp.aboutQt)
 
-        self._fit_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'), "&Fit", self,
+        self._fit_action = QtWidgets.QAction(QtGui.QIcon(':/images/open.png'), "&Fit", self,
                                          statusTip="Fit current data", triggered=self._on_fit_btn_clicked)
 
-        self._reset_initials_action = QtGui.QAction(QtGui.QIcon(':/images/open.png'), "&Reset initials", self,
+        self._reset_initials_action = QtWidgets.QAction(QtGui.QIcon(':/images/open.png'), "&Reset initials", self,
                                          statusTip="Reset fit starting values to default ones", triggered=self._reset_fit_initials)
 
 
 if __name__ == '__main__':
     import sys
-
-    app = QtGui.QApplication(sys.argv)
+    app = QtWidgets.QApplication(sys.argv)
     edp = MainWindow()
     edp.show()
     sys.exit(app.exec_())
