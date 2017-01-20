@@ -1,37 +1,8 @@
-# This file may be used to create an environment using:
-# $ conda create --name <env> --file <this file>
-# platform: win-64
-babel=2.3.4=py34_0
-cffi=1.8.3=py34_0
-click=6.6=py34_0
-cycler=0.10.0=py34_0
-jpeg=8d=vc10_2
-libpng=1.6.22=vc10_0
-libtiff=4.0.6=vc10_2
-matplotlib=1.5.1=np111py34_0
-mkl=11.3.3=1
-msvc_runtime=1.0.1=vc10_0
-numpy=1.11.2=py34_0
-openssl=1.0.2j=vc10_0
-pandas=0.19.1=np111py34_0
-pip=9.0.0=py34_0
-pycparser=2.16=py34_0
-pycrypto=2.6.1=py34_4
-pyparsing=2.1.4=py34_0
-pyqt=4.11.4=py34_7
-pyqtgraph=0.9.10=py34_1
-python=3.4.5=0
-python-dateutil=2.5.3=py34_0
-pytz=2016.7=py34_0
-pywin32=220=py34_1
-qt=4.8.7=vc10_9
-requests=2.11.1=py34_0
-scipy=0.18.1=np111py34_0
-seaborn=0.7.1=py34_0
-setuptools=27.2.0=py34_1
-sip=4.18=py34_0
-six=1.10.0=py34_0
-tk=8.5.18=vc10_0
-vs2010_runtime=10.00.40219.1=2
-wheel=0.29.0=py34_0
-zlib=1.2.8=vc10_3
+seaborn
+lmfit
+matplotlib
+pyqtgraph>=0.10.0
+numpy
+pandas
+pyqt>=5.6.0
+scipy
