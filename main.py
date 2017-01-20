@@ -200,6 +200,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma.value = 5
         self.c.value = 5000
 
+        # Fit residuals checkbox
+        self._fit_res_checkbox = QtWidgets.QCheckBox("Fit residuals")
+
         params_layout.addWidget(self.amp, 0, 0)
         params_layout.addWidget(self.center, 1, 0)
         params_layout.addWidget(self.sigma, 2, 0)
@@ -208,6 +211,7 @@ class MainWindow(QtWidgets.QMainWindow):
         params_layout.addWidget(self.y0, 0, 1)
         params_layout.addWidget(self.A, 1, 1)
         params_layout.addWidget(self.t2, 2, 1)
+        params_layout.addWidget(self._fit_res_checkbox, 3, 1)
 
         params_layout.setVerticalSpacing(0)
 
@@ -452,11 +456,10 @@ class MainWindow(QtWidgets.QMainWindow):
         fit_start, fit_end = self._get_region()
 
         df = self.data_in_range[(self.data_in_range.index > fit_start) & (self.data_in_range.index < fit_end)]
-        print(df)
         # Fit arrays
         fit_variable = self._graph_select.currentText() + '_mean'
         x = np.array(df.index.get_values())
-        if 'peak_fit_res' in df:
+        if self._fit_res_checkbox.isChecked():
             y = df['peak_fit_res'] + self.c.best_val
         else:
             y = df[fit_variable]
