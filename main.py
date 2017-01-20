@@ -2,7 +2,6 @@
 """
 Echo data calculation software
 """
-# Major library imports
 import numpy as np
 import pandas as pd
 from PyQt5 import QtCore, QtWidgets, QtGui
@@ -13,28 +12,30 @@ import pyqtgraph as pg
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 import matplotlib.pyplot as plt
+import matplotlib.lines as ml
 
 from lmfit.models import LorentzianModel, ConstantModel, Model, GaussianModel
 from lmfit.parameter import Parameters, Parameter
 
-from fitting.fit import fit_df, echo_decay_curve, prepare_data, PEAK_MODELS
+from fitting.fit import fit_peak_df, echo_decay_curve, prepare_data, PEAK_MODELS
 
 import seaborn as sns
+
 sns.set(style="whitegrid")
-
-
 LASER_TITLE = 'laser'
 DELAY_TITLE = 'time'
 
 
 class ParamWidget(QtWidgets.QWidget):
-    def __init__(self, name, display_name=None, val=0, vary=True, min=-np.inf, max=np.inf):
-        super().__init__(parent=None, flags=QtCore.Qt.Widget)
+    def __init__(self, name, display_name=None, val=0, vary=True, min=-np.inf, max=np.inf, parent=None,
+                 flags=QtCore.Qt.Widget):
+        super().__init__(parent=parent, flags=flags)
         self._name = name
         self._display_name = display_name if display_name else name
         self._min = min
         self._max = max
         self._val = val
+        self.best_val = val
         self.vary = vary
         self.param = Parameter(name, val, vary, min, max)
 
@@ -43,21 +44,19 @@ class ParamWidget(QtWidgets.QWidget):
         self._max_edit = QtWidgets.QDoubleSpinBox(self)
         self._val_edit = QtWidgets.QDoubleSpinBox(self)
 
-        self._set_spinboxes([self._min_edit, self._max_edit, self._val_edit])
+        self._setup_spinboxes([self._min_edit, self._max_edit, self._val_edit])
 
         self._vary_checkbox = QtWidgets.QCheckBox(self)
         self._vary_checkbox.setChecked(True)
         self._vary_checkbox.setStyleSheet("""
              QCheckBox::indicator {
-                 width: 16px;
-                 height: 16px;
+                width: 16px;
+                height: 16px;
              }
-            QCheckBox::indicator:checked
-              {
+             QCheckBox::indicator:checked {
                 image: url(resources/icons/unlocked.png);
               }
-              QCheckBox::indicator:unchecked
-              {
+              QCheckBox::indicator:unchecked {
                 image: url(resources/icons/locked.png);
               }
         """)
@@ -75,7 +74,7 @@ class ParamWidget(QtWidgets.QWidget):
 
         self.setMaximumWidth(250)
 
-    def _set_spinboxes(self, spinboxes):
+    def _setup_spinboxes(self, spinboxes):
         for spin in spinboxes:
             spin.setMaximum(99999)
             spin.setMinimum(-99999)
@@ -92,12 +91,12 @@ class ParamWidget(QtWidgets.QWidget):
             self.param = Parameter(self._name, val, vary, min_val, max_val)
         except ValueError as e:
             self.param = Parameter(self._name, val, vary)
-            #self.statusBar().showMessage("{}, min and max keep unchanged".format(e))
+            # self.statusBar().showMessage("{}, min and max keep unchanged".format(e))
 
     def from_res(self, res):
         val = res.best_values.get(self._name)
         self._val_edit.setValue(val)
-
+        self.best_val = val
 
     @property
     def value(self):
@@ -111,8 +110,8 @@ class ParamWidget(QtWidgets.QWidget):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
-        super(MainWindow, self).__init__()
+    def __init__(self, flags=QtCore.Qt.Window, parent=None):
+        super(MainWindow, self).__init__(parent, flags=flags)
 
         # pg.setConfigOption('background', 'w')
         # pg.setConfigOption('foreground', 'k')
@@ -123,11 +122,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Массив с данными
         self.data = pd.DataFrame()
-        self.data_filename = ""
+        self.data_filename = None
 
-        self._central_widget = QtWidgets.QWidget()
+        self._central_widget = QtWidgets.QWidget(self, flags=QtCore.Qt.Widget)
 
-        self._graph_tabs_widget = QtWidgets.QTabWidget()
+        self._graph_tabs_widget = QtWidgets.QTabWidget(self)
         self._graph_tabs_widget.currentChanged.connect(self._on_tab_changed)
 
         self._main_layout = QtWidgets.QHBoxLayout()
@@ -164,11 +163,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Результирующие графики
 
         # График фита
-        fitting_tab = QtWidgets.QWidget()
+        fitting_tab = QtWidgets.QWidget(self, flags=QtCore.Qt.Widget)
         # a figure instance to plot on
         self._fitting_figure = plt.figure()
         self._fitting_canvas = FigureCanvas(self._fitting_figure)
         self._ax = self._fitting_figure.add_subplot(111)
+        # Кривые
+        self.data_line, = self._ax.plot([], [], '.b', alpha=0.9)
+        self.peak_fit_line, = self._ax.plot([], [], '-g', alpha=0.9)
+        self.res_line, = self._ax.plot([], [], '.r', alpha=0.8)
+        self.echo_fit_line, = self._ax.plot([], [], '-k', alpha=0.9)
+        self.echo_fit_extended_line, = self._ax.plot([], [], '--k', alpha=0.6)
+
         # toolbar
         fitting_toolbar = NavigationToolbar(self._fitting_canvas, self)
         # fit parameters
@@ -185,7 +191,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Peak params
         self.amp = ParamWidget('peak_amplitude', 'Amp')
-        self.center = ParamWidget('peak_center', 'Center')
+        self.center = ParamWidget('peak_center', 'Cent')
         self.sigma = ParamWidget('peak_sigma', 'Sigma')
         self.c = ParamWidget('const_c', 'Const')
         # Initial guesses
@@ -214,7 +220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._graph_tabs_widget.addTab(fitting_tab, 'Фит')
 
         # График зависимости t2 от точки старта фита
-        fitting_stats_tab = QtWidgets.QWidget()
+        fitting_stats_tab = QtWidgets.QWidget(self, flags=QtCore.Qt.Widget)
         # a figure instance to plot on
         self._fitting_stats_figure = plt.figure()
         self._fitting_stats_canvas = FigureCanvas(self._fitting_stats_figure)
@@ -250,11 +256,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._v_line.sigPositionChangeFinished.connect(self._on_v_line_pos_changed)
 
         # Кпопка копирования в буфер
-        self._copy_data_btn = QtWidgets.QPushButton("Скопировать в буфер")
+        self._copy_data_btn = QtWidgets.QPushButton("Copy")
         self._copy_data_btn.clicked.connect(self._on_copy_data_clicked)
 
+        # Кнопка вычитания
+        self._sub_btn = QtWidgets.QPushButton("Subtract")
+        self._sub_btn.clicked.connect(self._on_sub_btn_clicked)
+        self._sub_btn.setToolTip("Subtract peak function")
+
         # Кнопка фита
-        self._fit_btn = QtWidgets.QPushButton("Фитировать")
+        self._fit_btn = QtWidgets.QPushButton("Fit")
         self._fit_btn.clicked.connect(self._on_fit_btn_clicked)
         self._fit_btn.setToolTip("Shift+Click to calc t2-start fit dependency")
 
@@ -274,6 +285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._aux_layout.addWidget(self._div_laser_checkbox)
         self._aux_layout.addStretch(5)
         self._aux_layout.addWidget(self._peak_model_select)
+        self._aux_layout.addWidget(self._sub_btn)
         self._aux_layout.addWidget(self._fit_btn)
         self._aux_layout.addWidget(self._copy_data_btn)
 
@@ -286,10 +298,6 @@ class MainWindow(QtWidgets.QMainWindow):
         w.setLayout(self._pyqtgraph_layout)
         self._splitter.addWidget(w)
         self._splitter.addWidget(self._graph_tabs_widget)
-        # self._main_layout.addLayout(self._pyqtgraph_layout)
-        # self._main_layout.addWidget(self._graph_tabs_widget)
-        # self._central_widget.setLayout(self._main_layout)
-        # self.setCentralWidget(self._central_widget)
         self.setCentralWidget(self._splitter)
 
         self._create_actions()
@@ -373,47 +381,85 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.means.empty:
             self.means.to_clipboard()
 
-    def _init_params(self):
-        # Params
-        params = Parameters()
-        y0_min = self.y0_min.value() if self.y0_min.value() > 0 else None
-        y0_max = self.y0_max.value() if self.y0_max.value() > 0 else None
-        y0_value = self.y0_value.value()
-        y0_vary = False if self.y0_fixed.isChecked() else True
-        params.add('y0', min=y0_min, max=y0_max, value=y0_value, vary=y0_vary)
-
-        A_min = self.A_min.value() if self.A_min.value() > 0 else None
-        A_max = self.A_max.value() if self.A_max.value() > 0 else None
-        A_value = self.A_value.value()
-        A_vary = False if self.A_fixed.isChecked() else True
-        params.add('A', min=A_min, max=A_max, value=A_value, vary=A_vary)
-
-        t2_min = self.t2_min.value() if self.t2_min.value() > 0 else None
-        t2_max = self.t2_max.value() if self.t2_max.value() > 0 else None
-        t2_value = self.t2_value.value()
-        t2_vary = False if self.t2_fixed.isChecked() else True
-        params.add('t2', min=t2_min, max=t2_max, value=t2_value, vary=t2_vary)
-
-        return params
-
-    def _fit_echo(self):
-        # clean plot
-        # self._fitting_figure.clear()
-
+    def _get_region(self):
+        """
+        Get selected region from pyqtgraph plot
+        :return: (min, max)
+        """
         # Check if x scale is log
         if self._log_checkbox.isChecked():
             fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]),
                                   10 ** float(self._fit_region.getRegion()[1])]
         else:
             fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
+        return fit_start, fit_end
 
-        # Fit arrays
-        all_x = np.array(self.data.index.get_values())
-        x = np.array(self.data_in_range.index.get_values())
-        if 'res' in self.data_in_range:
-            y = self.data_in_range['res']
+    def _on_sub_btn_clicked(self):
+        """
+        Fit with peak model, subtract and plot
+        :return: None
+        """
+        # Clear echo plot
+        self.echo_plot.clear()
+
+        # Get model and parameters
+        model = self._peak_model_select.currentText()
+        fit_variable = self._graph_select.currentText() + '_mean'
+        p_list = [self.amp.param, self.center.param, self.sigma.param, self.c.param]
+
+        # If all params may vary, doing auto-guess. Else creating params from spinboxes.
+        vary_all = all([p.vary for p in p_list])
+        if vary_all:
+            params = None
         else:
-            y = self.data_in_range[self._graph_select.currentText() + '_mean']
+            params = Parameters()
+            for p in p_list:
+                params.add(p.name, p.value, p.vary, p.min, p.max)
+
+        # Fitting
+        df, result = fit_peak_df(self.data_in_range, model, fit_range=self._get_region(),
+                                 params=params, fit_field=fit_variable)
+        self.data_in_range = df
+
+        # Populating spinboxes
+        self.amp.from_res(result)
+        self.center.from_res(result)
+        self.sigma.from_res(result)
+        self.c.from_res(result)
+
+        # Plot fitted data, fit and residuals
+        self.data_line.set_data(df.index.get_values(), df[fit_variable])
+        self.peak_fit_line.set_data(df.index.get_values(), df['peak_fit'])
+        self.res_line.set_data(df.index.get_values(), df['peak_fit_res'] + self.c.best_val)
+
+        self.echo_plot.plot(df.index.get_values(), df[fit_variable], pen=(200, 200, 200),
+                            symbolBrush=(230, 0, 0, 0.8 * 255), symbolPen='w', symbolSize=3)
+        self.echo_plot.plot(df.index.get_values(), np.array(df['peak_fit_res'].values) + self.c.best_val, pen=(90, 200, 90),
+                            symbolBrush=(90, 200, 90, 0.8 * 255), symbolPen='w', symbolSize=5)
+        self.echo_plot.addItem(self._fit_region)
+
+        # refresh canvas and rescale
+        self._ax.relim()
+        self._ax.autoscale_view()
+        # update plot
+        self._fitting_figure.canvas.draw()
+        self._fitting_figure.canvas.flush_events()
+
+        print(result.fit_report())
+
+    def _fit_echo(self):
+
+        fit_start, fit_end = self._get_region()
+
+        df = self.data_in_range[(self.data_in_range.index > fit_start) & (self.data_in_range.index < fit_end)]
+        print(df)
+        # Fit arrays
+        fit_variable = self._graph_select.currentText() + '_mean'
+        x = np.array(df.index.get_values())
+        if 'peak_fit_res' in df:
+            y = df['peak_fit_res'] + self.c.best_val
+        else:
+            y = df[fit_variable]
 
         params = Parameters()
         params.add_many(
@@ -422,15 +468,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ('t2', self.t2.param.value, self.t2.param.vary, self.t2.param.min, self.t2.param.max),
         )
         model = Model(echo_decay_curve, independent_vars=['x'])
-
         result = model.fit(y, x=x, params=params)
 
-        time = np.arange(fit_start, fit_end, 0.001)
-        all_time = np.linspace(x.min(), x.max(), 2000)
+        all_time = np.linspace(0.1, self.data_in_range.index.get_values().max(), 2000)
 
         # plot data
-        self._ax.plot(time, echo_decay_curve(x=time, **result.values), '-r', alpha=0.9, linewidth=2)
-        self._ax.plot(all_time, echo_decay_curve(x=all_time, **result.values), '--k', alpha=0.4)
+        self.echo_fit_line.set_data(x, echo_decay_curve(x=x, **result.values))
+        self.echo_fit_extended_line.set_data(all_time, echo_decay_curve(x=all_time, **result.values))
 
         # Подсчитываем данные
         t2 = result.values['t2']
@@ -440,9 +484,12 @@ class MainWindow(QtWidgets.QMainWindow):
         delta_f_stderr = delta_f*t2_stderr/t2
         self._ax.set_title("$T_2$: {:0.2f} $\pm$ {:0.2f} $ps$ ({:0.2f} $\pm$ {:0.2f} $MHz$ )".format(t2, t2_stderr,
                                                                                                delta_f, delta_f_stderr))
-        # refresh canvas and tight layout
-        self._fitting_canvas.draw()
-        self._fitting_figure.tight_layout()
+        # refresh canvas and rescale
+        self._ax.relim()
+        self._ax.autoscale_view()
+        # update plot
+        self._fitting_figure.canvas.draw()
+        self._fitting_figure.canvas.flush_events()
         # Populating report
         self.fit_report_text.append(result.fit_report())
         # Populating spinboxes
@@ -450,60 +497,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.A.from_res(result)
         self.t2.from_res(result)
 
-    def _fit_peak(self):
-        model = PEAK_MODELS[self._peak_model_select.currentText()]
-
-        # Check if x scale is log
-        if self._log_checkbox.isChecked():
-            fit_start, fit_end = [10 ** float(self._fit_region.getRegion()[0]),
-                                  10 ** float(self._fit_region.getRegion()[1])]
-        else:
-            fit_start, fit_end = [float(self._fit_region.getRegion()[0]), float(self._fit_region.getRegion()[1])]
-
-        #print(fit_start, fit_end, self.data[self._graph_select.currentText()])
-        #print(self.data_in_range.head())
-        field_name = self._graph_select.currentText() + '_mean'
-        params = Parameters()
-        params.add_many(
-            ('peak_amplitude', self.amp.param.value, self.amp.param.vary, self.amp.param.min, self.amp.param.max),
-            ('peak_center', self.center.param.value, self.center.param.vary, self.center.param.min, self.center.param.max),
-            ('peak_sigma', self.sigma.param.value, self.sigma.param.vary, self.sigma.param.min, self.sigma.param.max),
-            ('const_c', self.c.param.value, self.c.param.vary, self.c.param.min, self.c.param.max),
-        )
-
-        df, res = fit_df(self.data_in_range, params=params, model=model, fit_range=(fit_start, fit_end), fit_field=field_name)
-        self.amp.from_res(res)
-        self.center.from_res(res)
-        self.sigma.from_res(res)
-        self.c.from_res(res)
-
-        self.data_in_range['res'] = df.peak_fit_res
-
-        x = np.array(df.index.get_values())
-        y = np.array(df.peak_fit.values)
-        self._fitting_figure.clear()
-        self._ax = self._fitting_figure.add_subplot(111)
-        # plot data
-        self._ax.plot(x, df[field_name], '.')
-        # plot fit
-        fit_x = np.arange(x.min(), x.max(), 0.001)
-        fit_y = res.eval(x=fit_x)
-        self._ax.plot(fit_x, fit_y, '-', alpha=0.7, linewidth=2)
-        self._ax.plot(x, df.peak_fit_res + self.c.param.value, '.', alpha=0.7)
-        self._ax.set_xlim([fit_start, fit_end])
-        # refresh canvas and tight layout
-        self._fitting_canvas.draw()
-        self._fitting_figure.tight_layout()
-
     def _on_fit_btn_clicked(self):
-        if self._peak_model_select.currentText() == 'Echo':
-            self._fit_echo()
-            modifiers = QtWidgets.QApplication.keyboardModifiers()
-            if modifiers == QtCore.Qt.ShiftModifier:
-                self._calc_fit_start_dep_curve()
-
-        else:
-            self._fit_peak()
+        self._fit_echo()
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        if modifiers == QtCore.Qt.ShiftModifier:
+            self._calc_fit_start_dep_curve()
 
     def _update_line_pos(self):
         try:
@@ -527,12 +525,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.y0.value = 5000
         self.A.value = 500
         self.t2.value = 500
-
-        # Initial guesses
-        self.amp.value = 10000
-        self.center.value = 0
-        self.sigma.value = 5
-        self.c.value = 5000
 
     def _on_bins_value_changed(self):
         """
@@ -572,7 +564,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_in_range = prepare_data(self.data, laser_window=(self._laser_min, self._laser_max),
                                           laser_title=LASER_TITLE, time_title=DELAY_TITLE)
 
-        selected_graph = self._graph_select.currentText() + '_mean'
+        if self._graph_select.currentText():
+            selected_graph = self._graph_select.currentText() + '_mean'
+            selected_graph_std = self._graph_select.currentText() + '_std'
+        else:
+            selected_graph = 'laser_mean'
+            selected_graph_std = 'laser_std'
 
         self._del_rows_count = (self.data.shape[0] - self.data_in_range.shape[0])/self.data.shape[0] * 100
         self._laser_mean = self.data_in_range[LASER_TITLE + '_mean'].mean()
@@ -585,12 +582,10 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_column = 'normed' if self._div_laser_checkbox.isChecked() else selected_graph
         self.echo_plot.plot(self.data_in_range.index.get_values(), self.data_in_range[plot_column], pen=(200, 200, 200), symbolBrush=(230, 0, 0, 0.8*255), symbolPen='w', symbolSize=3)
         err = pg.ErrorBarItem(x=self.data_in_range.index.get_values(), y=self.data_in_range[selected_graph],
-                              height=2*self.data_in_range[self._graph_select.currentText() + '_std'], beam=0.5)
+                              height=2*self.data_in_range[selected_graph_std], beam=0.5)
         # self.echo_plot.addItem(err)
-        # self._fit_region.setRegion([0, 1])
         self.echo_plot.addItem(self._fit_region)
         self._update_statusbar()
-        # self._update_line_pos()
 
     def _update_statusbar(self):
         if self._log_checkbox.isChecked():
@@ -607,7 +602,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.laser_plot.clear()
         self._graph_select.clear()
         self._fit_stats = False
-        self._fitting_figure.clear()
         self._fitting_stats_figure.clear()
         self.fit_report_text.clear()
 
@@ -624,8 +618,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fill_graph_select()
             self._plot_hist()
             self._calc_curve_data()
-            # except Exception as e:
-            # self.statusBar().showMessage("Loading failed: {}".format(e))
 
     def _plot_hist(self):
         if not self.data.empty:

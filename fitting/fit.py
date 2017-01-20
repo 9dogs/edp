@@ -23,7 +23,7 @@ def prepare_data(df, laser_window, laser_title='laser', time_title='time'):
     Loads echo data from `filename` and filter with laser_window = [min, max] ([mean-std, mean+std] on default)
     """
     df_orig = df
-    df_orig.columns = [c.lower() for c in df_orig.columns]
+    df_orig.columns = [c.lower().replace(' ', '_') for c in df_orig.columns]
 
     l_min, l_max = laser_window
 
@@ -38,9 +38,9 @@ def prepare_data(df, laser_window, laser_title='laser', time_title='time'):
     return pd.concat([df_mean, df_std], axis=1)
 
 
-def fit_df(df, model=GaussianModel, params=None, fit_range=(-np.inf, np.inf), x_field=None, fit_field='nphe2_mean', out_field='peak_fit'):
+def fit_peak_df(df, model=GaussianModel, params=None, fit_range=(-np.inf, np.inf), x_field=None, fit_field='nphe2_mean', out_field='peak_fit'):
     """
-    Fit dataframe with selected model
+    Fits DataFrame with selected peak model. Appends residuals column to DataFrame.
     """
     # Data
     fit_min, fit_max = fit_range
@@ -58,6 +58,12 @@ def fit_df(df, model=GaussianModel, params=None, fit_range=(-np.inf, np.inf), x_
     full_y = np.array(df[fit_field].values)
 
     # Models
+    if isinstance(model, str):
+        try:
+            model = PEAK_MODELS[model]
+        except KeyError:
+            print("Undefined model: {}, using default".format(model))
+
     peak_mod = model(prefix='peak_')
     const_mod = ConstantModel(prefix='const_')
     result_model = const_mod + peak_mod
