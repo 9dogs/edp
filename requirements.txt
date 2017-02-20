@@ -1,0 +1,8 @@
+seaborn
+lmfit
+matplotlib
+pyqtgraph>=0.10.0
+numpy
+pandas
+pyqt>=5.6.0
+scipy
