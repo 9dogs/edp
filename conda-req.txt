@@ -1,0 +1,14 @@
+# This file may be used to create an environment using:
+# $ conda create --name <env> --file <this file>
+# platform: win-64
+matplotlib=1.5.3=np111py34_0
+natsort=5.0.1=py34_0
+numpy=1.11.3=py34_0
+pandas=0.19.2=np111py34_1
+pyqt=5.6.0=py34_0
+pyqtgraph=0.9.10=py34_1
+qt=5.6.2=vc10_3
+scikit-learn=0.18.1=np111py34_1
+scipy=0.18.1=np111py34_1
+seaborn=0.7.1=py34_0
+sip=4.18=py34_0
