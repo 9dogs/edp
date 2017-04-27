@@ -534,7 +534,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Функция срабатывает при изменении бинов
         """
         if not self.data.empty:
-            y, x = np.histogram(self.data[LASER_TITLE], bins=self._bins_widget.value())
+            y, x = np.histogram(self.data[LASER_TITLE], bins=int(self._bins_widget.value()))
             curve = pg.PlotCurveItem(x, y, stepMode=True, fillLevel=0, brush=(255, 255, 255, 40))
             self.laser_plot.clear()
             self.laser_plot.addItem(curve)
@@ -625,7 +625,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _plot_hist(self):
         if not self.data.empty:
             try:
-                y, x = np.histogram(self.data[LASER_TITLE], bins=self._bins_widget.value())
+                y, x = np.histogram(self.data[LASER_TITLE], bins=int(self._bins_widget.value()))
                 curve = pg.PlotCurveItem(x, y, stepMode=True, fillLevel=0, brush=(255, 255, 255, 40))
                 self.laser_plot.addItem(curve)
                 std = self.data[LASER_TITLE].std()
