@@ -25,6 +25,13 @@ sns.set(style="whitegrid")
 LASER_TITLE = 'laser'
 DELAY_TITLE = 'time'
 
+import os
+if os.name == "nt":  # if windows
+    import PyQt5
+    pyqt_plugins = os.path.join(os.path.dirname(PyQt5.__file__),
+                               "..", "..", "..", "Library", "plugins")
+    QtWidgets.QApplication.addLibraryPath(pyqt_plugins)
+
 
 class ParamWidget(QtWidgets.QWidget):
     def __init__(self, name, display_name=None, val=0, vary=True, min=-np.inf, max=np.inf, parent=None,
